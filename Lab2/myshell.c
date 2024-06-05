@@ -1,168 +1,145 @@
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
-#include <ctype.h>
-#include <unistd.h> // For getcwd
-#include <sys/wait.h>
-#include <sys/stat.h>
-#include <sys/types.h>
+#include <unistd.h>
+#include <string.h>
+#include <limits.h>
 #include "LineParser.h"
-#include <signal.h>
+#include <sys/wait.h>
 #include <fcntl.h>
-#include <linux/stat.h>
-#include <linux/limits.h> // For PATH_MAX
+#include <sys/syscall.h>
+#include <signal.h>
 
-//#define PATH_MAX 4096
-#define MY_MAX_INPUT 2048
+#define MAX_BUFFER 2048
+int debug = 0;
 
-void handleAlarm(int process_id){
-    
-    if(kill(process_id, SIGCONT) == -1){
-        fprintf(stderr, "failed to send SIGCONT sign\n");
-    }
-    else{
-        printf("SIGCONT sign was sent to process: %d\n", process_id);
-    }
-}
-
- void handleBlast(int process_id){
-    if(kill(process_id, SIGKILL) == -1){
-        fprintf(stderr, "failed to send SIGKLILL sign\n");
-    }
-    else{
-        printf("SIGKILL sign was sent to process: %d\n", process_id);
-    }
-
-}
-
-void execute(cmdLine *pCmdLines, int debug)
+void debugCheck(int argc, char *argv[])
 {
-   pid_t child_pid; /* child process id*/
-   if((child_pid = fork()) == -1){ //couldn't fork
-    perror("fork() error");
-    exit(1);
-   }
-   else if(child_pid == 0){
-    if(pCmdLines->inputRedirect != NULL){
-        int fd = open(pCmdLines->inputRedirect, O_RDONLY);
-        if(fd == -1){
-            perror("open() error");
-            _exit(1);
-        }
-            if(dup2(fd,STDIN_FILENO) == -1){
-            perror("dup2() error");
-            _exit(1);
-        }
-            close(fd);
-    }
-    if(pCmdLines->outputRedirect != NULL){
-        
-        int fd = open(pCmdLines->outputRedirect, O_WRONLY | O_CREAT | O_TRUNC ,S_IRUSR | S_IWUSR);
-        if(fd == -1){
-            perror("open() error");
-            _exit(1);
-        }
-        if(dup2(fd,STDOUT_FILENO) == -1){
-            perror("dup2() error");
-            _exit(1);
-        }
-        close(fd);
-    }
-    if(execvp(pCmdLines->arguments[0], pCmdLines->arguments) == -1){ /* execv needs to recieve the full path name, while execvp needs only to recieve the filename, and then it searches this name inside the cd*/
-      perror("execvp() error");
-      _exit(1);  
-    }
-   }
-   else{ //creates a child process that runs conccurently with the parent process.
-        if(debug){
-            fprintf(stderr, "PID: %d\n", child_pid);
-            fprintf(stderr,"Executing Command:%s\n", pCmdLines->arguments[0]);
-        }
-
-        if(pCmdLines->blocking){ //blocking is 1 
-            waitpid(child_pid, NULL, 0);
-        }
-    }
-}
-
-
-int main(int argc, char **argv)
-{
-    char cwd[PATH_MAX];
-    char input[MY_MAX_INPUT];
-    cmdLine* parseCmd;
-
-    int debug = 0;
-    for(int i = 0; i < argc; i++){
-        //updating debug mode if we passed "-d"
-        if(strcmp(argv[i], "-d") == 0){ //the argument that we passed is -d
+    for (int i = 1; i < argc; i++)
+    {
+        if (argv[i][0] == '-' && argv[i][1] == 'd' && argv[i][2] == '\0')
+        {
             debug = 1;
         }
     }
-     
-    while(1){ /* infinite loop*/
-        if(getcwd(cwd, sizeof(cwd)) != NULL){
-            printf("%s\n ", cwd); //check in the frontal lab may need to go inside the while loop
-        }
-        else{
-            perror("getcwd() error");
-            return 1;
-        }
-
-        if(fgets(input, sizeof(input), stdin) == NULL){
-            perror("Error in reading the input");
-            return 1;
-        }
-        if (strcmp(input, "quit\n") == 0) {
-        printf("Exiting shell.\n");
-        break;
-        }
-
-        parseCmd = parseCmdLines(input);
-        if(parseCmd == NULL){
-            perror("Error in parsing command");
-            continue;
-        }
-        /* checks the type of command the shell recieved and reacts accordingly */
-        if(strcmp(parseCmd->arguments[0], "cd") == 0){ //change directory
-            //printf("argCount: %d\n", parseCmd->argCount);
-            if(parseCmd->argCount < 2){
-                fprintf(stderr, "Error: file or directory name is missing\n");
-            }
-            else if(chdir(parseCmd->arguments[1]) == -1){ /* checks if the next argument is a name of an actual file */
-                fprintf(stderr, "cd: %s: No such file or directory \n", parseCmd->arguments[1]);
-            }
-            freeCmdLines(parseCmd);
-            continue; /* cd command is handled internally by the shell and doesn't require creating a new process or executing any other command*/
-        }
-        else if(strcmp(parseCmd->arguments[0], "alarm") == 0){ //wakes up a sleeping process
-            if(parseCmd->argCount < 2){
-                fprintf(stderr, "alarm: pid is missing\n");
-            }
-            else{
-                int pid = atoi(parseCmd->arguments[1]);
-                handleAlarm(pid);
-            }
-            freeCmdLines(parseCmd);
-            continue;
-        }
-        else if(strcmp(parseCmd->arguments[0], "blast") == 0){ //terminates a running/sleeping process
-            if(parseCmd->argCount < 2){
-                fprintf(stderr, "blast: pid is missing\n");
-            }
-            else{
-                int pid = atoi(parseCmd->arguments[1]);
-                handleBlast(pid);
-            }
-            freeCmdLines(parseCmd);
-            continue;
-        }
-
-
-        execute(parseCmd, debug); //if the commands is neither of cd alarm or blast, it handles different commands that the user can ask for
-        freeCmdLines(parseCmd);
-    }
-
-    return 0;
 }
 
+void cwdPrompt()
+{
+    char cwdBuffer[PATH_MAX];
+    getcwd(cwdBuffer, PATH_MAX);
+    printf("%s ", cwdBuffer);
+}
+
+void alarmFunc(int pid)
+{
+    if (kill(pid, SIGCONT) != 0)
+    {
+        perror("unsuccesfull alarm");
+    }
+    else
+    {
+        printf("Woken pid: %d\n", pid);
+    }
+}
+
+void blastFunc(int pid)
+{
+    if (kill(pid, SIGINT) != 0)
+    {
+        perror("unsuccesfull blast");
+    }
+    else
+    {
+        printf("Terminated pid: %d\n", pid);
+    }
+}
+
+void execute(cmdLine *pCmdLine)
+{
+    int pid;
+    if (strcmp(pCmdLine->arguments[0], "cd") == 0 && pCmdLine->arguments[1] != NULL)
+    {
+        if (chdir(pCmdLine->arguments[1]) == -1)
+        {
+            fprintf(stderr, "cd: %s: No such directory\n", pCmdLine->arguments[1]);
+        }
+        return;
+    }
+    if (strcmp("alarm", pCmdLine->arguments[0]) == 0)
+    {
+        alarmFunc(atoi(pCmdLine->arguments[1]));
+        return;
+    }
+    if (strcmp("blast", pCmdLine->arguments[0]) == 0)
+    {
+        blastFunc(atoi(pCmdLine->arguments[1]));
+        return;
+    }
+    if ((pid = fork()) == 0)
+    {
+        if (pCmdLine != NULL)
+        {
+            if (pCmdLine->inputRedirect != NULL)
+            {
+                close(STDIN_FILENO);
+                int newInputFile = open(pCmdLine->inputRedirect, O_RDONLY);
+                if (newInputFile == -1)
+                {
+                    perror("failed switching stdin");
+                    exit(1);
+                }
+            }
+            if (pCmdLine->outputRedirect != NULL)
+            {
+                close(STDOUT_FILENO);
+                int outputFile = open(pCmdLine->outputRedirect, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (outputFile == -1)
+                {
+                    perror("failed switching stdout");
+                    _exit(1);
+                }
+
+            }
+            if (execvp(pCmdLine->arguments[0], pCmdLine->arguments) == -1)
+            {
+                perror("execvp failed");
+                exit(1);
+            }
+        }
+    }
+    else
+     {
+            if (debug)
+            {
+                fprintf(stderr, "PID: %d\n", pid);
+                fprintf(stderr, "Executing command: %s\n", pCmdLine->arguments[0]);
+            }
+            if (pCmdLine->blocking == 1)
+            {
+                int status;
+                waitpid(pid, &status, 0);
+            }
+        }
+    }
+
+
+int main(int argc, char *argv[])
+{
+    char inputBuffer[MAX_BUFFER];
+    cmdLine *input;
+    debugCheck(argc, argv);
+    while (1)
+    {
+        cwdPrompt();
+        fgets(inputBuffer, MAX_BUFFER, stdin);
+        input = parseCmdLines(inputBuffer);
+        if (strcmp(input->arguments[0], "quit") == 0)
+        {
+            freeCmdLines(input);
+            break;
+        }
+        execute(input);
+        freeCmdLines(input);
+    }
+    return 0;
+}
